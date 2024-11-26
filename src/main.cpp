@@ -5,7 +5,8 @@
 #define LENGTH(x) (strlen(x) + 1)
 #define EEPROM_SIZE 200
 
-#define GPIO_PIN 22
+#define GPIO_PIN 5
+#define BUZZER_PIN 4
 
 static const uint16_t screenWidth  = 240;
 static const uint16_t screenHeight = 320;
@@ -29,10 +30,13 @@ void open_door_gpio(lv_timer_t* timer);
 void writeStringToFlash(const char* toStore, int startAddr);
 void readStringFromFlash(int startAddr);
 void reset_lable(lv_timer_t * timer);
+void beepBuzzer(uint16_t duration);
 bool passwordChangeMode = false;
 bool newPasswordMode = false;
-bool door_opened = false;         // Trạng thái cửa
-lv_timer_t *door_timer = NULL;    // Biến lưu timer mở cửa
+bool door_opened = false;        
+lv_timer_t *door_timer = NULL;   
+lv_timer_t *buzzer_timer = NULL;
+int wrongAttemptCount = 0;
 /* Display flushing */
 void my_disp_flush(lv_disp_drv_t *disp_drv, const lv_area_t *area, lv_color_t *color_p) {
     uint32_t w = ( area->x2 - area->x1 + 1 );
@@ -65,10 +69,12 @@ void setup() {
     lv_init();
     EEPROM.begin(EEPROM_SIZE);
     pinMode(GPIO_PIN, OUTPUT);
-    // Ensure password is initialized properly
+    pinMode(BUZZER_PIN, OUTPUT);
+    digitalWrite(BUZZER_PIN, HIGH);
+
     if (EEPROM.read(0) < 1 || EEPROM.read(0) > 1) {
         writeStringToFlash(pss, 1);
-    }   
+    }    
     readStringFromFlash(1); 
     Serial.println(pss);   
     tft.begin();          
@@ -99,7 +105,7 @@ void setup() {
 
 void loop() {
     lv_timer_handler();
-    delay(5);
+    delay(10);
 }
 
 
@@ -107,7 +113,7 @@ static void btnm_event_handler(lv_event_t *e) {
     lv_obj_t * obj = lv_event_get_target(e);
     ta = (lv_obj_t *) lv_event_get_user_data(e);
     const char *txt = lv_btnmatrix_get_btn_text(obj, lv_btnmatrix_get_selected_btn(obj));
-
+    beepBuzzer(60);
     if (strcmp(txt, LV_SYMBOL_BACKSPACE) == 0) {
         lv_textarea_del_char(ta);
     }
@@ -123,39 +129,44 @@ static void btnm_event_handler(lv_event_t *e) {
             newPasswordMode = true;
         }
         else if (newPasswordMode) {
-            strncpy(pss, lv_textarea_get_text(ta), sizeof(pss));  // Using strncpy for safety
+            strncpy(pss, lv_textarea_get_text(ta), sizeof(pss)); 
             Serial.println(pss);
             writeStringToFlash(pss, 1);
             newPasswordMode = false;
             passwordChangeMode = false;
-            lv_timer_create(reset_lable, 500, NULL);
+            lv_timer_create(reset_lable, 200, NULL);
         }
         else if (strcmp(lv_textarea_get_text(ta), pss) == 0) { 
             Serial.printf("Password correct\n");
+            wrongAttemptCount = 0;
             Status("OPEN DOOR", lv_color_hex(0x00FF00)); 
-             if (!door_opened) {
+            if (!door_opened) {
                 door_opened = true;
                 if (door_timer == NULL) {
-                    door_timer = lv_timer_create(open_door_gpio, 100, NULL);
+                    door_timer = lv_timer_create(open_door_gpio, 500, NULL);
                 }
-        }
-
-        // Tạo timer reset giao diện sau 2 giây
-        lv_timer_create([](lv_timer_t *reset_timer) {
-            lv_timer_del(reset_timer); // Xóa timer reset
-        }, 2000, NULL);
-
-
+            }
+            lv_timer_create([](lv_timer_t *reset_timer) {
+                lv_timer_del(reset_timer); 
+            }, 2000, NULL);
             lv_timer_create(reset_lable, 2000, NULL);  
-            newPasswordMode = false;
-            passwordChangeMode = false;
+                newPasswordMode = false;
+                passwordChangeMode = false;
         }
         else {
             Status("Incorrect!", lv_color_hex(0xFF0000));  
-            lv_timer_create(reset_lable, 2000, NULL);  
+            wrongAttemptCount++;
+            lv_timer_create(reset_lable, 5000, NULL);  
+            if (wrongAttemptCount >= 4) {
+                Serial.println("WARNING: Too many failed attempts!");
+                Status("ALERT! LOCKED!", lv_color_hex(0xFF0000));
+                beepBuzzer(5000); 
+                wrongAttemptCount = 0;
+            }
             newPasswordMode = false;
             passwordChangeMode = false;
         }
+
         lv_textarea_set_text(ta, "");
     } 
     else if (strcmp(txt, LV_SYMBOL_HOME) == 0) {
@@ -232,19 +243,27 @@ void readStringFromFlash(int startAddr) {
 
 
 void open_door_gpio(lv_timer_t *timer) {
-    // Bật GPIO để mở cửa
     digitalWrite(GPIO_PIN, HIGH);
     Serial.println("Door Opened (GPIO ON)");
-
-    // Tạo timer để tắt GPIO sau 2 giây
     lv_timer_t *close_timer = lv_timer_create([](lv_timer_t *close_timer) {
-        digitalWrite(GPIO_PIN, LOW); // Tắt GPIO
+        digitalWrite(GPIO_PIN, LOW); 
         Serial.println("Door Closed (GPIO OFF)");
-        door_opened = false;         // Cập nhật trạng thái
-        lv_timer_del(close_timer);   // Xóa timer tắt cửa
+        door_opened = false;       
+        lv_timer_del(close_timer);   
     }, 2000, NULL);
-
-    // Xóa timer mở cửa vì không cần nữa
     lv_timer_del(timer);
-    door_timer = NULL; // Reset biến timer
+    door_timer = NULL; 
 }
+
+void beepBuzzer(uint16_t duration) {
+    digitalWrite(BUZZER_PIN, LOW);
+    if (buzzer_timer != NULL) {
+        lv_timer_del(buzzer_timer);
+        buzzer_timer = NULL;
+    }
+    buzzer_timer = lv_timer_create([](lv_timer_t *timer) {
+         digitalWrite(BUZZER_PIN, HIGH);
+        lv_timer_del(timer); 
+        buzzer_timer = NULL;
+    }, duration, NULL);
+} 
